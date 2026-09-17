@@ -39,9 +39,12 @@ parser.add_argument('--seed', default=0, type=int, metavar='t', help='random see
 parser.add_argument('--gpu', default='1', type=str, help='gpu device ids for CUDA_VISIBLE_DEVICES')
 parser.add_argument('--mode', default='all', type=str, help='all or indoor for sysu') # SYSU-MM01
 parser.add_argument('--tvsearch', default=True, help='whether thermal to visible search on RegDB') # RegDB
+parser.add_argument('--mask_ratio', default=0.0, type=float, help='random rectangle masking ratio for query images during testing')
+parser.add_argument('--mask_seed', default=0, type=int, help='random seed for query masking')
 
 args = parser.parse_args()
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+set_seed(args.seed)
 
 dataset = args.dataset
 if dataset == 'sysu':
@@ -95,6 +98,32 @@ transform_test = transforms.Compose([
 
 end = time.time()
 
+
+def random_rect_mask(images, mask_ratio=0.2):
+    if mask_ratio <= 0:
+        return images
+
+    images = images.clone()
+    B, C, H, W = images.shape
+    area = H * W
+    target_area = area * mask_ratio
+
+    for i in range(B):
+        aspect_ratio = random.uniform(0.5, 2.0)
+        mask_h = int((target_area / aspect_ratio) ** 0.5)
+        mask_w = int((target_area * aspect_ratio) ** 0.5)
+
+        mask_h = min(mask_h, H)
+        mask_w = min(mask_w, W)
+
+        top = random.randint(0, H - mask_h)
+        left = random.randint(0, W - mask_w)
+
+        images[i, :, top:top + mask_h, left:left + mask_w] = 0
+
+    return images
+
+
 def fliplr(img):
     '''flip horizontal'''
     inv_idx = torch.arange(img.size(3)-1,-1,-1).long()  # N x C x H x W
@@ -105,6 +134,7 @@ def fliplr(img):
 def extract_gall_feat(gall_loader):
     net.eval()
     print ('Extracting Gallery Feature...')
+    random.seed(args.mask_seed)
     start = time.time()
     ptr = 0
     gall_feat1 = np.zeros((ngall, pool_dim))
@@ -116,6 +146,7 @@ def extract_gall_feat(gall_loader):
     with torch.no_grad():
         for batch_idx, (input, label) in enumerate(gall_loader):
             batch_num = input.size(0)
+            input = random_rect_mask(input, mask_ratio=args.mask_ratio)
             input1 = Variable(input.cuda())
             input2 = Variable(fliplr(input).cuda())
             feat_pool1, feat_fc1 = net(input1, input1, test_mode[0])

@@ -157,6 +157,125 @@ class FactorizedDeformBranch(nn.Module):
         x = self.proj(x)
         x = self.bn3(x)
         return x
+
+class StandardDeformBranch(nn.Module):
+    """
+    3x3 standard 2D deformable convolution -> 1x1 projection
+    用于与 FactorizedDeformBranch 做公平对比
+    """
+    def __init__(self, in_channels, out_channels, dilation=2, use_bn=False):
+        super(StandardDeformBranch, self).__init__()
+
+        self.use_bn = use_bn
+
+        self.conv = DeformConvPack(
+            in_channels,
+            out_channels,
+            kernel_size=(3, 3),
+            stride=1,
+            padding=(dilation, dilation),
+            dilation=(dilation, dilation),
+            bias=False
+        )
+
+        self.bn1 = nn.BatchNorm2d(out_channels) if use_bn else nn.Identity()
+
+        self.proj = nn.Conv2d(
+            out_channels,
+            out_channels,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=False
+        )
+
+        self.bn2 = nn.BatchNorm2d(out_channels) if use_bn else nn.Identity()
+
+        self.relu = nn.ReLU(inplace=True)
+
+        self.proj.apply(weights_init_kaiming)
+
+        if use_bn:
+            self.bn1.apply(weights_init_kaiming)
+            self.bn2.apply(weights_init_kaiming)
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+
+        x = self.proj(x)
+        x = self.bn2(x)
+
+        return x
+
+class ReverseFactorizedDeformBranch(nn.Module):
+    """
+    3x1 deformable -> 1x3 deformable -> 1x1 conv
+    Reverse version of FactorizedDeformBranch
+    """
+    def __init__(self, in_channels, out_channels, dilation=2, use_bn=False):
+        super(ReverseFactorizedDeformBranch, self).__init__()
+
+        self.use_bn = use_bn
+
+        # 3x1 deformable
+        self.conv1 = DeformConvPack(
+            in_channels,
+            out_channels,
+            kernel_size=(3, 1),
+            stride=1,
+            padding=(dilation, 0),
+            dilation=(dilation, 1),
+            bias=False
+        )
+        self.bn1 = nn.BatchNorm2d(out_channels) if use_bn else nn.Identity()
+
+        # 1x3 deformable
+        self.conv2 = DeformConvPack(
+            out_channels,
+            out_channels,
+            kernel_size=(1, 3),
+            stride=1,
+            padding=(0, dilation),
+            dilation=(1, dilation),
+            bias=False
+        )
+        self.bn2 = nn.BatchNorm2d(out_channels) if use_bn else nn.Identity()
+
+        # 1x1 projection
+        self.proj = nn.Conv2d(
+            out_channels,
+            out_channels,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=False
+        )
+        self.bn3 = nn.BatchNorm2d(out_channels) if use_bn else nn.Identity()
+
+        self.relu = nn.ReLU(inplace=True)
+
+        self.proj.apply(weights_init_kaiming)
+
+        if use_bn:
+            self.bn1.apply(weights_init_kaiming)
+            self.bn2.apply(weights_init_kaiming)
+            self.bn3.apply(weights_init_kaiming)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = self.relu(x)
+
+        x = self.proj(x)
+        x = self.bn3(x)
+
+        return x
     
 class MSDEE_module(nn.Module):
     def __init__(self, channel, reduction=16):
@@ -174,6 +293,18 @@ class MSDEE_module(nn.Module):
             dilation=2,
             use_bn=True
         )
+        # self.FC12 = FactorizedDeformBranch(
+        #     in_channels=channel,
+        #     out_channels=channel // 4,
+        #     dilation=2,
+        #     use_bn=True
+        # )
+        # self.FC12 = ReverseFactorizedDeformBranch(
+        #     in_channels=channel,
+        #     out_channels=channel // 4,
+        #     dilation=2,
+        #     use_bn=True
+        # )
 
         self.FC13 = nn.Conv2d(channel, channel // 4, kernel_size=3, stride=1,
                               padding=3, bias=False, dilation=3)
@@ -193,6 +324,18 @@ class MSDEE_module(nn.Module):
             dilation=2,
             use_bn=True
         )
+        # self.FC22 = FactorizedDeformBranch(
+        #                 in_channels=channel,
+        #                 out_channels=channel // 4,
+        #                 dilation=2,
+        #                 use_bn=True
+        #             )
+        # self.FC22 = ReverseFactorizedDeformBranch(
+        #     in_channels=channel,
+        #     out_channels=channel // 4,
+        #     dilation=2,
+        #     use_bn=True
+        # )
 
         self.FC23 = nn.Conv2d(channel, channel // 4, kernel_size=3, stride=1,
                               padding=3, bias=False, dilation=3)
@@ -209,6 +352,7 @@ class MSDEE_module(nn.Module):
 
         x2 = (self.FC21(x) + self.FC22(x) + self.FC23(x)) / 3
         x2 = self.FC2(F.relu(x2))
+        
         out = torch.cat((x, x1, x2), 0)
         out = self.dropout(out)
 
@@ -699,7 +843,158 @@ class DGCLRM_block(nn.Module):
         z = self.CNL(x, x0)
         z = self.PNL(z, x0)
         return z
+
+class DGCLRM_block_Option(nn.Module):
+    """
+    Switchable MFA block for ablation.
+
+    use_cmh=False, use_rpg=False:
+        original CNL -> original PNL
+
+    use_cmh=True, use_rpg=False:
+        CMH-CNL -> original PNL
+
+    use_cmh=False, use_rpg=True:
+        original CNL -> RPG-PNL
+
+    use_cmh=True, use_rpg=True:
+        CMH-CNL -> RPG-PNL
+    """
+
+    def __init__(
+        self,
+        high_dim,
+        low_dim,
+        flag=0,
+        cnl_heads=4,
+        cnl_alpha=0.01,
+        cnl_max_alpha=0.1,
+        pnl_beta=0.01,
+        pnl_max_beta=0.05,
+        reduc_ratio=2,
+        use_cmh=True,
+        use_rpg=True
+    ):
+        super(DGCLRM_block_Option, self).__init__()
+
+        if use_cmh:
+            self.CNL = CMH_CNL(
+                high_dim=high_dim,
+                low_dim=low_dim,
+                flag=flag,
+                num_heads=cnl_heads,
+                init_alpha=cnl_alpha,
+                max_alpha=cnl_max_alpha
+            )
+        else:
+            self.CNL = CNL(
+                high_dim=high_dim,
+                low_dim=low_dim,
+                flag=flag
+            )
+
+        if use_rpg:
+            self.PNL = RPG_PNL(
+                high_dim=high_dim,
+                low_dim=low_dim,
+                reduc_ratio=reduc_ratio,
+                init_beta=pnl_beta,
+                max_beta=pnl_max_beta
+            )
+        else:
+            self.PNL = PNL(
+                high_dim=high_dim,
+                low_dim=low_dim,
+                reduc_ratio=reduc_ratio
+            )
+
+    def forward(self, x, x0):
+        z = self.CNL(x, x0)
+        z = self.PNL(z, x0)
+        return z
         
+
+class RelationChannelGate(nn.Module):
+    """
+    Relation-guided Channel Gate.
+
+    输入:
+        energy: [B, C, C]
+
+    输出:
+        gate: [B, C, 1, 1]
+
+    含义:
+        从 CNL 的 channel relation matrix 中判断每个输出通道的聚合可靠性。
+    """
+
+    def __init__(
+        self,
+        channels,
+        init_beta=0.01,
+        max_beta=0.05,
+        eps=1e-6
+    ):
+        super(RelationChannelGate, self).__init__()
+
+        self.channels = channels
+        self.max_beta = max_beta
+        self.eps = eps
+
+        self.gate = nn.Sequential(
+            nn.Conv1d(2, 8, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm1d(8),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(8, 1, kernel_size=1, bias=True)
+        )
+
+        self.beta = nn.Parameter(torch.tensor(init_beta, dtype=torch.float32))
+
+        self._init_params()
+
+    def _init_params(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out")
+                if getattr(m, "bias", None) is not None:
+                    nn.init.constant_(m.bias, 0.0)
+
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1.0)
+                nn.init.constant_(m.bias, 0.0)
+
+        # 初始 raw=0, gate=1
+        nn.init.constant_(self.gate[-1].weight, 0.0)
+        nn.init.constant_(self.gate[-1].bias, 0.0)
+
+    def forward(self, energy):
+        """
+        energy: [B, C, C]
+        """
+
+        B, C, _ = energy.size()
+
+        # 每个 query channel 对所有 key channels 的平均关系
+        mean_rel = energy.mean(dim=-1)       # [B, C]
+
+        # 每个 query channel 的最强 channel 匹配
+        max_rel = energy.max(dim=-1)[0]      # [B, C]
+
+        stat = torch.stack([mean_rel, max_rel], dim=1)  # [B, 2, C]
+
+        # 稳定尺度
+        stat = stat - stat.mean(dim=-1, keepdim=True)
+        stat = stat / (stat.std(dim=-1, keepdim=True) + self.eps)
+
+        raw = self.gate(stat)  # [B, 1, C]
+
+        beta = torch.clamp(self.beta, 0.0, self.max_beta)
+
+        gate = 1.0 + beta * torch.tanh(raw)
+        gate = gate.view(B, C, 1, 1)
+
+        return gate
+
 class embed_net(nn.Module):
     def __init__(self,  class_num, dataset, arch='resnet50'):
         super(embed_net, self).__init__()
@@ -734,13 +1029,27 @@ class embed_net(nn.Module):
                             high_dim=512,
                             low_dim=256,
                             flag=1,
-                            cnl_heads=8,
+                            cnl_heads=4,
                             cnl_alpha=0.02,
                             cnl_max_alpha=0.3,
                             pnl_beta=0.001,
                             pnl_max_beta=0.013,
                             reduc_ratio=2
                         )
+            # self.MFA2 = DGCLRM_block_Option(
+            #                 high_dim=512,
+            #                 low_dim=256,
+            #                 flag=1,
+            #                 cnl_heads=4,
+            #                 cnl_alpha=0.02,
+            #                 cnl_max_alpha=0.3,
+            #                 pnl_beta=0.001,
+            #                 pnl_max_beta=0.013,
+            #                 reduc_ratio=2,
+            #                 use_cmh=True,
+            #                 use_rpg=True
+            #             )
+                        
             self.MFA3 = MFA_block(1024, 512, 1)
 
 

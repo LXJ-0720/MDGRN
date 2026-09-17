@@ -239,6 +239,13 @@ python test.py --dataset sysu --mode indoor \
     --resume <checkpoint_name> --gpu 0 
 ```
 
+For query-only random rectangle masking experiments, keep the gallery unchanged and set `--mask_ratio`:
+
+```bash
+python test.py --dataset sysu --mode all \
+    --resume <checkpoint_name> --gpu 0 --mask_ratio 0.2 --mask_seed 0
+```
+
 ### RegDB
 
 For RegDB, `test.py` evaluates all 10 trials. Use `--tvsearch True` for thermal query to visible gallery and `--tvsearch False` for visible query to thermal gallery.
