@@ -302,9 +302,9 @@ class ReverseFactorizedDeformBranch(nn.Module):
 
         return x
     
-class DEE_module(nn.Module):
+class MSDEE_module(nn.Module):
     def __init__(self, channel, reduction=16):
-        super(DEE_module, self).__init__()
+        super(MSDEE_module, self).__init__()
 
         # -------- group 1 --------
         self.FC11 = nn.Conv2d(channel, channel // 4, kernel_size=3, stride=1,
@@ -726,7 +726,7 @@ class RelationPositionGate(nn.Module):
 
         return gate
 
-class RPG_PA(nn.Module):
+class RPG_SA(nn.Module):
     """
     Relation-guided Position Gated PNL.
 
@@ -747,7 +747,7 @@ class RPG_PA(nn.Module):
         init_beta=0.01,
         max_beta=0.05
     ):
-        super(RPG_PA, self).__init__()
+        super(RPG_SA, self).__init__()
 
         self.high_dim = high_dim
         self.low_dim = low_dim
@@ -991,7 +991,6 @@ class embed_net(nn.Module):
                             reduc_ratio=2
                         )
             self.MFA3 = MFA_block(1024, 512, 1)
-            self.CMSSM = CrossModalSelectiveStateSpace(1024) if use_cmssm else nn.Identity()
 
 
         self.bottleneck = nn.BatchNorm1d(pool_dim)
