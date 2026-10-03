@@ -463,7 +463,7 @@ class MFA_block(nn.Module):
         z = self.CNL(x, x0)
         z = self.PNL(z, x0)
         return z
-class CMH_CNL(nn.Module):
+class CMH_CA(nn.Module):
     """
     Cosine-guided Multi-Head Channel Non-Local block.
 
@@ -493,7 +493,7 @@ class CMH_CNL(nn.Module):
         max_alpha=0.3,
         eps=1e-6
     ):
-        super(CMH_CNL, self).__init__()
+        super(CMH_CA, self).__init__()
 
         assert low_dim % num_heads == 0, \
             "low_dim must be divisible by num_heads."
@@ -726,7 +726,7 @@ class RelationPositionGate(nn.Module):
 
         return gate
 
-class RPG_PNL(nn.Module):
+class RPG_PA(nn.Module):
     """
     Relation-guided Position Gated PNL.
 
@@ -747,7 +747,7 @@ class RPG_PNL(nn.Module):
         init_beta=0.01,
         max_beta=0.05
     ):
-        super(RPG_PNL, self).__init__()
+        super(RPG_PA, self).__init__()
 
         self.high_dim = high_dim
         self.low_dim = low_dim
@@ -867,76 +867,7 @@ class DGCLRM_block(nn.Module):
         z = self.CNL(x, x0)
         z = self.PNL(z, x0, return_gate=return_gate)
         return z
-
-class DGCLRM_block_Option(nn.Module):
-    """
-    Switchable MFA block for ablation.
-
-    use_cmh=False, use_rpg=False:
-        original CNL -> original PNL
-
-    use_cmh=True, use_rpg=False:
-        CMH-CNL -> original PNL
-
-    use_cmh=False, use_rpg=True:
-        original CNL -> RPG-PNL
-
-    use_cmh=True, use_rpg=True:
-        CMH-CNL -> RPG-PNL
-    """
-
-    def __init__(
-        self,
-        high_dim,
-        low_dim,
-        flag=0,
-        cnl_heads=4,
-        cnl_alpha=0.01,
-        cnl_max_alpha=0.1,
-        pnl_beta=0.01,
-        pnl_max_beta=0.05,
-        reduc_ratio=2,
-        use_cmh=True,
-        use_rpg=True
-    ):
-        super(DGCLRM_block_Option, self).__init__()
-
-        if use_cmh:
-            self.CNL = CMH_CNL(
-                high_dim=high_dim,
-                low_dim=low_dim,
-                flag=flag,
-                num_heads=cnl_heads,
-                init_alpha=cnl_alpha,
-                max_alpha=cnl_max_alpha
-            )
-        else:
-            self.CNL = CNL(
-                high_dim=high_dim,
-                low_dim=low_dim,
-                flag=flag
-            )
-
-        if use_rpg:
-            self.PNL = RPG_PNL(
-                high_dim=high_dim,
-                low_dim=low_dim,
-                reduc_ratio=reduc_ratio,
-                init_beta=pnl_beta,
-                max_beta=pnl_max_beta
-            )
-        else:
-            self.PNL = PNL(
-                high_dim=high_dim,
-                low_dim=low_dim,
-                reduc_ratio=reduc_ratio
-            )
-
-    def forward(self, x, x0):
-        z = self.CNL(x, x0)
-        z = self.PNL(z, x0)
-        return z
-        
+   
 class RelationChannelGate(nn.Module):
     """
     Relation-guided Channel Gate.
