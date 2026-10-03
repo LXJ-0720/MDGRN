@@ -92,6 +92,51 @@ class base_resnet(nn.Module):
         x = self.base.layer4(x)
         return x
 
+class DeformConvPack(nn.Module):
+    """
+    通用可变形卷积封装，支持 kernel_size=(1,3)/(3,1)/(3,3)
+    """
+    def __init__(self, in_channels, out_channels,
+                 kernel_size, stride=1, padding=0, dilation=1, bias=False):
+        super(DeformConvPack, self).__init__()
+
+        if isinstance(kernel_size, int):
+            kh, kw = kernel_size, kernel_size
+        else:
+            kh, kw = kernel_size
+
+        self.offset_conv = nn.Conv2d(
+            in_channels,
+            2 * kh * kw,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            bias=True
+        )
+
+        self.deform_conv = DeformConv2d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            bias=bias
+        )
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        self.deform_conv.apply(weights_init_kaiming)
+        # 很重要：offset 全 0 初始化，训练一开始更稳
+        nn.init.zeros_(self.offset_conv.weight)
+        nn.init.zeros_(self.offset_conv.bias)
+
+    def forward(self, x):
+        offset = self.offset_conv(x)
+        out = self.deform_conv(x, offset)
+        return out
 class FactorizedDeformBranch(nn.Module):
     """
     1x3 deformable -> 3x1 deformable -> 1x1 conv
@@ -277,9 +322,9 @@ class ReverseFactorizedDeformBranch(nn.Module):
 
         return x
     
-class MSDEE_module(nn.Module):
+class DEE_module(nn.Module):
     def __init__(self, channel, reduction=16):
-        super(MSDEE_module, self).__init__()
+        super(DEE_module, self).__init__()
 
         # -------- group 1 --------
         self.FC11 = nn.Conv2d(channel, channel // 4, kernel_size=3, stride=1,
@@ -352,7 +397,8 @@ class MSDEE_module(nn.Module):
 
         x2 = (self.FC21(x) + self.FC22(x) + self.FC23(x)) / 3
         x2 = self.FC2(F.relu(x2))
-        
+
+    
         out = torch.cat((x, x1, x2), 0)
         out = self.dropout(out)
 
@@ -437,9 +483,7 @@ class MFA_block(nn.Module):
         z = self.CNL(x, x0)
         z = self.PNL(z, x0)
         return z
- 
-
-class CMH_CA(nn.Module):
+class CMH_CNL(nn.Module):
     """
     Cosine-guided Multi-Head Channel Non-Local block.
 
@@ -469,7 +513,7 @@ class CMH_CA(nn.Module):
         max_alpha=0.3,
         eps=1e-6
     ):
-        super(CMH_CA, self).__init__()
+        super(CMH_CNL, self).__init__()
 
         assert low_dim % num_heads == 0, \
             "low_dim must be divisible by num_heads."
@@ -702,7 +746,7 @@ class RelationPositionGate(nn.Module):
 
         return gate
 
-class RPG_SA(nn.Module):
+class RPG_PNL(nn.Module):
     """
     Relation-guided Position Gated PNL.
 
@@ -723,7 +767,7 @@ class RPG_SA(nn.Module):
         init_beta=0.01,
         max_beta=0.05
     ):
-        super(RPG_SA, self).__init__()
+        super(RPG_PNL, self).__init__()
 
         self.high_dim = high_dim
         self.low_dim = low_dim
@@ -801,13 +845,25 @@ class RPG_SA(nn.Module):
         # 关键：gate 来自 PNL 自己的 relation matrix
         pos_gate = self.rel_gate(energy, H, W)
 
-        W_y = W_y * pos_gate
+        W_y = W_y  * pos_gate
 
         z = W_y + x_h
 
         return z
 
-class DGCLRM_block(nn.Module):
+class CMH_RPG_MFA_block(nn.Module):
+    """
+    CMH-RPG MFA.
+
+    结构:
+        CMH-CNL -> RPG-PNL
+
+    设计:
+        CNL: 使用 cosine-guided multi-head channel relation；
+        PNL: 使用 relation-guided position gate；
+        其中 RPG-PNL 作为主要增强，CMH-CNL 作为轻量通道关系补充。
+    """
+
     def __init__(
         self,
         high_dim,
@@ -820,9 +876,9 @@ class DGCLRM_block(nn.Module):
         pnl_max_beta=0.05,
         reduc_ratio=2
     ):
-        super(DGCLRM_block, self).__init__()
+        super(CMH_RPG_MFA_block, self).__init__()
 
-        self.CNL = CMH_CA(
+        self.CNL = CMH_CNL(
             high_dim=high_dim,
             low_dim=low_dim,
             flag=flag,
@@ -831,7 +887,7 @@ class DGCLRM_block(nn.Module):
             max_alpha=cnl_max_alpha
         )
 
-        self.PNL = RPG_SA(
+        self.PNL = RPG_PNL(
             high_dim=high_dim,
             low_dim=low_dim,
             reduc_ratio=reduc_ratio,
@@ -844,7 +900,7 @@ class DGCLRM_block(nn.Module):
         z = self.PNL(z, x0)
         return z
 
-class DGCLRM_block_Option(nn.Module):
+class CMH_RPG_MFA_block_Option(nn.Module):
     """
     Switchable MFA block for ablation.
 
@@ -875,7 +931,7 @@ class DGCLRM_block_Option(nn.Module):
         use_cmh=True,
         use_rpg=True
     ):
-        super(DGCLRM_block_Option, self).__init__()
+        super(CMH_RPG_MFA_block_Option, self).__init__()
 
         if use_cmh:
             self.CNL = CMH_CNL(
@@ -913,7 +969,6 @@ class DGCLRM_block_Option(nn.Module):
         z = self.PNL(z, x0)
         return z
         
-
 class RelationChannelGate(nn.Module):
     """
     Relation-guided Channel Gate.
@@ -1006,26 +1061,24 @@ class embed_net(nn.Module):
         self.dataset = dataset
         if self.dataset == 'regdb': # For regdb dataset, we remove the MFA3 block and layer4.
             pool_dim = 1024
-            self.DEE = MSDEE_module(512)
+            self.DEE = DEE_module(512)
             self.MFA1 = MFA_block(256, 64, 0)
-            self.MFA2 = DGCLRM_block(
+            self.MFA2 = CMH_RPG_MFA_block(
                             high_dim=512,
                             low_dim=256,
                             flag=1,
                             cnl_heads=4,
                             cnl_alpha=0.01,
                             cnl_max_alpha=0.3,
-                            pnl_beta=0.001,
-                            pnl_max_beta=0.013,
+                            pnl_beta=0.01,
+                            pnl_max_beta=0.03,
                             reduc_ratio=2
                         )
         else:
             pool_dim = 2048
-            self.DEE = MSDEE_module(1024)
-
+            self.DEE = DEE_module(1024)
             self.MFA1 = MFA_block(256, 64, 0)
-
-            self.MFA2 = DGCLRM_block(
+            self.MFA2 = CMH_RPG_MFA_block(
                             high_dim=512,
                             low_dim=256,
                             flag=1,
@@ -1036,20 +1089,6 @@ class embed_net(nn.Module):
                             pnl_max_beta=0.013,
                             reduc_ratio=2
                         )
-            # self.MFA2 = DGCLRM_block_Option(
-            #                 high_dim=512,
-            #                 low_dim=256,
-            #                 flag=1,
-            #                 cnl_heads=4,
-            #                 cnl_alpha=0.02,
-            #                 cnl_max_alpha=0.3,
-            #                 pnl_beta=0.001,
-            #                 pnl_max_beta=0.013,
-            #                 reduc_ratio=2,
-            #                 use_cmh=True,
-            #                 use_rpg=True
-            #             )
-                        
             self.MFA3 = MFA_block(1024, 512, 1)
 
 
@@ -1062,7 +1101,7 @@ class embed_net(nn.Module):
         self.l2norm = Normalize(2)
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         
-    def forward(self, x1, x2, modal=0):
+    def forward(self, x1, x2, modal=0, feature_mode='full'):
         if modal == 0:
             x1 = self.visible_module(x1)
             x2 = self.thermal_module(x2)
