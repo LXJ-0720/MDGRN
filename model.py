@@ -36,8 +36,33 @@ def weights_init_classifier(m):
     classname = m.__class__.__name__
     if classname.find('Linear') != -1:
         init.normal_(m.weight.data, 0, 0.001)
-        if m.bias:
+        if m.bias is not None:
             init.zeros_(m.bias.data)
+
+
+class DeformConvPack(nn.Module):
+    """Deformable convolution with an internally predicted offset field."""
+
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
+                 padding=0, dilation=1, bias=False):
+        super(DeformConvPack, self).__init__()
+        if isinstance(kernel_size, int):
+            kh, kw = kernel_size, kernel_size
+        else:
+            kh, kw = kernel_size
+        self.offset = nn.Conv2d(
+            in_channels, 2 * kh * kw, kernel_size, stride=stride,
+            padding=padding, dilation=dilation, bias=True
+        )
+        self.conv = DeformConv2d(
+            in_channels, out_channels, kernel_size, stride=stride,
+            padding=padding, dilation=dilation, bias=bias
+        )
+        nn.init.constant_(self.offset.weight, 0.0)
+        nn.init.constant_(self.offset.bias, 0.0)
+
+    def forward(self, x):
+        return self.conv(x, self.offset(x))
 
 
 
@@ -92,51 +117,6 @@ class base_resnet(nn.Module):
         x = self.base.layer4(x)
         return x
 
-class DeformConvPack(nn.Module):
-    """
-    通用可变形卷积封装，支持 kernel_size=(1,3)/(3,1)/(3,3)
-    """
-    def __init__(self, in_channels, out_channels,
-                 kernel_size, stride=1, padding=0, dilation=1, bias=False):
-        super(DeformConvPack, self).__init__()
-
-        if isinstance(kernel_size, int):
-            kh, kw = kernel_size, kernel_size
-        else:
-            kh, kw = kernel_size
-
-        self.offset_conv = nn.Conv2d(
-            in_channels,
-            2 * kh * kw,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-            bias=True
-        )
-
-        self.deform_conv = DeformConv2d(
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-            bias=bias
-        )
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        self.deform_conv.apply(weights_init_kaiming)
-        # 很重要：offset 全 0 初始化，训练一开始更稳
-        nn.init.zeros_(self.offset_conv.weight)
-        nn.init.zeros_(self.offset_conv.bias)
-
-    def forward(self, x):
-        offset = self.offset_conv(x)
-        out = self.deform_conv(x, offset)
-        return out
 class FactorizedDeformBranch(nn.Module):
     """
     1x3 deformable -> 3x1 deformable -> 1x1 conv
@@ -851,19 +831,7 @@ class RPG_PNL(nn.Module):
 
         return z
 
-class CMH_RPG_MFA_block(nn.Module):
-    """
-    CMH-RPG MFA.
-
-    结构:
-        CMH-CNL -> RPG-PNL
-
-    设计:
-        CNL: 使用 cosine-guided multi-head channel relation；
-        PNL: 使用 relation-guided position gate；
-        其中 RPG-PNL 作为主要增强，CMH-CNL 作为轻量通道关系补充。
-    """
-
+class DGCLRM_block(nn.Module):
     def __init__(
         self,
         high_dim,
@@ -876,9 +844,9 @@ class CMH_RPG_MFA_block(nn.Module):
         pnl_max_beta=0.05,
         reduc_ratio=2
     ):
-        super(CMH_RPG_MFA_block, self).__init__()
+        super(DGCLRM_block, self).__init__()
 
-        self.CNL = CMH_CNL(
+        self.CNL = CMH_CA(
             high_dim=high_dim,
             low_dim=low_dim,
             flag=flag,
@@ -887,7 +855,7 @@ class CMH_RPG_MFA_block(nn.Module):
             max_alpha=cnl_max_alpha
         )
 
-        self.PNL = RPG_PNL(
+        self.PNL = RPG_SA(
             high_dim=high_dim,
             low_dim=low_dim,
             reduc_ratio=reduc_ratio,
@@ -895,12 +863,12 @@ class CMH_RPG_MFA_block(nn.Module):
             max_beta=pnl_max_beta
         )
 
-    def forward(self, x, x0):
+    def forward(self, x, x0, return_gate=False):
         z = self.CNL(x, x0)
-        z = self.PNL(z, x0)
+        z = self.PNL(z, x0, return_gate=return_gate)
         return z
 
-class CMH_RPG_MFA_block_Option(nn.Module):
+class DGCLRM_block_Option(nn.Module):
     """
     Switchable MFA block for ablation.
 
@@ -931,7 +899,7 @@ class CMH_RPG_MFA_block_Option(nn.Module):
         use_cmh=True,
         use_rpg=True
     ):
-        super(CMH_RPG_MFA_block_Option, self).__init__()
+        super(DGCLRM_block_Option, self).__init__()
 
         if use_cmh:
             self.CNL = CMH_CNL(
@@ -1061,24 +1029,26 @@ class embed_net(nn.Module):
         self.dataset = dataset
         if self.dataset == 'regdb': # For regdb dataset, we remove the MFA3 block and layer4.
             pool_dim = 1024
-            self.DEE = DEE_module(512)
+            self.DEE = MSDEE_module(512)
             self.MFA1 = MFA_block(256, 64, 0)
-            self.MFA2 = CMH_RPG_MFA_block(
+            self.MFA2 = DGCLRM_block(
                             high_dim=512,
                             low_dim=256,
                             flag=1,
                             cnl_heads=4,
                             cnl_alpha=0.01,
                             cnl_max_alpha=0.3,
-                            pnl_beta=0.01,
-                            pnl_max_beta=0.03,
+                            pnl_beta=0.001,
+                            pnl_max_beta=0.013,
                             reduc_ratio=2
                         )
         else:
             pool_dim = 2048
-            self.DEE = DEE_module(1024)
+            self.DEE = MSDEE_module(1024)
+
             self.MFA1 = MFA_block(256, 64, 0)
-            self.MFA2 = CMH_RPG_MFA_block(
+
+            self.MFA2 = DGCLRM_block(
                             high_dim=512,
                             low_dim=256,
                             flag=1,
@@ -1090,6 +1060,7 @@ class embed_net(nn.Module):
                             reduc_ratio=2
                         )
             self.MFA3 = MFA_block(1024, 512, 1)
+            self.CMSSM = CrossModalSelectiveStateSpace(1024) if use_cmssm else nn.Identity()
 
 
         self.bottleneck = nn.BatchNorm1d(pool_dim)
